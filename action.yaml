@@ -1,0 +1,157 @@
+name: Bump Version
+description: Action to bump the version of a project
+inputs:
+  pat:
+    description: PAT for accessing the application repo
+    required: true
+  increment:
+    description: The type of increment to make
+    required: true
+    default: patch
+  working-dir:
+    description: The working directory of the project
+    required: false
+    default: "."
+  helm:
+    description: The project uses Helm
+    required: false
+    default: "false"
+  node:
+    description: The project uses Node
+    required: false
+    default: "false"
+  python:
+    description: The project uses Python
+    required: false
+    default: "false"
+  go:
+    description: The project uses Go
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+      with:
+        token: ${{ inputs.pat }}
+    
+    - name: Check if app should be updated
+      run: |
+        if [ "${{ inputs.node }}" == 'true' ] || [ "${{ inputs.python }}" == 'true' ] || [ "${{ inputs.go }}" == 'true' ]; then
+          echo "UPDATE_APP=true" >> $GITHUB_ENV
+        else
+          echo "UPDATE_APP=false" >> $GITHUB_ENV
+        fi
+      shell: bash
+    
+    - name: Get current app version
+      if: ${{ env.UPDATE_APP == 'true' }}
+      run: |
+        echo "APP_VERSION=$(cat VERSION)" >> $GITHUB_ENV
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+    
+    - name: Get current chart version
+      if: ${{ inputs.helm == 'true' }}
+      run: |
+        echo "CHART_VERSION=$(cat ./charts/VERSION)" >> $GITHUB_ENV
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+
+    - name: Install semver utility
+      run: |
+        npm i -g semver
+      shell: bash
+
+    - name: Increment App versions
+      if: ${{ env.UPDATE_APP == 'true' }}
+      run: |
+        echo "NEW_APP_VERSION=$(semver -i ${{ inputs.increment }} $APP_VERSION)" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Increment Chart versions
+      if: ${{ inputs.helm == 'true' }}
+      run: |
+        echo "NEW_CHART_VERSION=$(semver -i ${{ inputs.increment }} $CHART_VERSION)" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Bump VERSION file
+      if: ${{ env.UPDATE_APP == 'true' }}
+      run: |
+        echo $NEW_APP_VERSION > VERSION
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+
+    - name: Bump VERSION file in chart
+      if: ${{ inputs.helm == 'true' }}
+      run: |
+        echo $NEW_CHART_VERSION > ./charts/VERSION
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+
+    - name: Bump version in helm chart
+      if: ${{ inputs.helm == 'true' }}
+      # We are using sed instead of yq as yq is not preserving empty lines. See https://github.com/mikefarah/yq/issues/515
+      run: |
+        if [ -f "./charts/Chart.yaml" ]; then
+          find ./charts -name "Chart.yaml" -exec sed -i -E "s/^version: [0-9\.]*/version: "$NEW_CHART_VERSION"/g" {} \;
+        fi
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+
+    - name: Bump appVersion in helm chart
+      if: ${{ inputs.helm == 'true' && env.UPDATE_APP == 'true' }}
+      # We are using sed instead of yq as yq is not preserving empty lines. See https://github.com/mikefarah/yq/issues/515
+      run: |
+        if [ -f "./charts/Chart.yaml" ]; then
+          find ./charts -name "Chart.yaml" -exec sed -i -E "s/appVersion: [0-9\.]*/appVersion: "$NEW_APP_VERSION"/g" {} \;
+        fi
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+
+    - name: Bump package.json and package-lock.json
+      if: ${{ inputs.node == 'true' }}
+      # We are using env.NEW_APP_VERSION instead of $NEW_APP_VERSION as yq does not easily substitute variables
+      run: |
+        yq -i -o=json -P '.version = "${{ env.NEW_APP_VERSION }}"' 'package.json'
+        if [ -f "./package-lock.json" ]; then
+          yq -i -o=json -P '.version = "${{ env.NEW_APP_VERSION }}" | .packages[""].version = "${{ env.NEW_APP_VERSION }}"' 'package-lock.json'
+        fi
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+
+      # Create commit messages
+    - name: Commit message for only chart
+      if: ${{ inputs.helm == 'true' && env.UPDATE_APP == 'false' }}
+      run: |
+        echo "COMMIT_MESSAGE="feat: bump chart version to $NEW_CHART_VERSION"" >> $GITHUB_ENV
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+
+    - name: Commit message for only app
+      if: ${{ inputs.helm == 'false' && env.UPDATE_APP == 'true' }}
+      run: |
+        echo "COMMIT_MESSAGE="feat: bump app version to $NEW_APP_VERSION"" >> $GITHUB_ENV
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+
+    - name: Commit message for only chart
+      if: ${{ inputs.helm == 'true' && env.UPDATE_APP == 'true' }}
+      run: |
+        echo "COMMIT_MESSAGE="feat: bump chart version to $NEW_CHART_VERSION and app version to $NEW_APP_VERSION"" >> $GITHUB_ENV
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+    
+    - name: Commit Changes
+      env:
+        GIT_AUTHOR_NAME: Vyoma
+        GIT_COMMITTER_NAME: Vyoma
+        GIT_AUTHOR_EMAIL: admin@myvyoma.io
+        GIT_COMMITTER_EMAIL: admin@myvyoma.io
+      run: |
+        git add -A
+        git diff-index --quiet HEAD || git commit -m "$COMMIT_MESSAGE"
+        git push
+      shell: bash
